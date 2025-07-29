@@ -1,5 +1,4 @@
 import copy
-from array import array 
 from typing import NamedTuple 
 from tilt.board import Singleton, Vec2D
 
@@ -37,12 +36,14 @@ if __name__ == "__main__":
 
     tile1 = Singleton(pos=Vec2D(5, 2))
 
-    xs = array('L', [])
+    xs: dict[int, int] = {}
     sxs: list[int] = list()
+    ys: set[int] = set() 
 
     for i in range(1000000):
-        xs.append(i)
+        xs[i] = 2*i 
         sxs.append(i)
+        ys.add(i)
 
     print("Built from scratch")
     print(timeit("z = i1.swap()", "from __main__ import i1", number=100000))
@@ -59,5 +60,8 @@ if __name__ == "__main__":
     print("Traversing list")
     print(timeit("for x in sxs: pass", "from __main__ import sxs", number=100))
 
-    print("Traversing array")
+    print("Traversing dict")
     print(timeit("for x in xs: pass", "from __main__ import xs", number=100))
+
+    print("Traversing set")
+    print(timeit("for y in ys: pass", "from __main__ import ys", number=100))
