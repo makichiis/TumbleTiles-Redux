@@ -145,6 +145,14 @@ class TumbleController:
         #       minimize iteration time of polyominoes each step 
         singletons: dict[Vec2D, Singleton] = field(default_factory=dict[Vec2D, Singleton])
 
+        def refresh(self):
+            tiles: list[Singleton] = []
+
+            for tile in self.singletons.values(): tiles.append(tile)
+
+            self.singletons.clear()
+            for tile in tiles: self.singletons[tile.pos] = tile 
+
     def __init__(self, board: Board):
         self.board = board 
 
@@ -204,7 +212,7 @@ class TumbleController:
 
     def position_is_available(self, at: Vec2D) -> bool:
         """Returns true if `pos` is within the bounding box of `self.board` and does not contain a concrete."""
-        return (not at in self.board.concretes) \
+        return (not (at in self.board.concretes or at in self.effective_wall_cache)) \
             and at.x >= 0 and at.y >= 0 \
             and at.x < self.board.size.x and at.y < self.board.size.y 
 
@@ -219,14 +227,14 @@ class TumbleController:
             case TiltDirection.WEST:
                 return UNIT_VEC_WEST 
 
-    def get_adjacent_polyominoes(self, of: Polyomino, with_delta: Vec2D) -> set[Polyomino]:
+    def get_adjacent_polyominoes(self, of: Polyomino, with_delta: Vec2D) -> list[Polyomino]:
         """Retrieve all polyominoes that touch `of` at each `with_delta` face."""
         
-        result: set[TumbleController.Polyomino] = set()
+        result: list[TumbleController.Polyomino] = [] 
 
         for pos in of.singletons.keys():
             polyomino = self.polyomino_cache.get(pos.add(with_delta))
-            if polyomino: result.add(polyomino)
+            if polyomino: result.append(polyomino)
 
         return result 
 
@@ -257,6 +265,7 @@ class TumbleController:
                     queue.put(adjacent_polyomino) 
 
     def update_wall_cache(self, for_direction: TiltDirection):
+        # TODO 
         ...
     
     def update_polyomino_cache(self):
@@ -270,11 +279,22 @@ class TumbleController:
 
     def step(self, direction: TiltDirection):
         """Perform a single step of a full tilt sequence in a given direction."""
+        self.polyomino_cache.clear() 
         self.update_polyomino_cache()
-        if direction != self.last_direction: self.refresh_wall_cache(direction)
-        else: self.update_wall_cache(direction)
+        self.refresh_wall_cache(direction)
+        # if direction != self.last_direction: self.refresh_wall_cache(direction)
+        # else: self.update_wall_cache(direction)
 
-        # TODO: Move polyominoes and merge glues 
+        print(f"Polyominoes: {len(self.polyomino_cache)} | Wall polyominoes: {len(self.effective_wall_cache)}")
+
+        delta = self.get_delta(direction)
+        for polyomino in self.polyomino_cache.values():
+            if next(iter(polyomino.singletons.keys())) in self.effective_wall_cache: continue 
+            for pos, tile in polyomino.singletons.items():
+                self.board.tiles.set_location_of(tile, pos.add(delta))
+                polyomino.refresh()
+
+        # TODO: Polyomino cache invalidation and merge glues 
 
     def tumble(self, direction: TiltDirection):
         """Perform a complete full tilt in a given direction."""
@@ -289,10 +309,10 @@ class BoardWriter:
     def print(self): 
         print("- " * (self.board.size.x + 2))
 
-        for y in range(self.board.size.x):
+        for y in range(self.board.size.y):
             print("|", end=' ')
 
-            for x in range(self.board.size.y):
+            for x in range(self.board.size.x):
                 if Vec2D(x, y) in self.board.tiles.elements:
                     print("O", end=' ')
                 elif Vec2D(x, y) in self.board.concretes:
@@ -306,10 +326,10 @@ class BoardWriter:
 
 
 if __name__ == "__main__":
-    board = Board(size=Vec2D(15, 15))
+    board = Board(size=Vec2D(8, 3))
     writer = BoardWriter(board)
 
-    board.tiles.add(Singleton(Vec2D(1, 0)))
+    board.tiles.add(Singleton(Vec2D(0, 0)))
     board.tiles.add(Singleton(Vec2D(0, 1)))
     board.tiles.add(Singleton(Vec2D(3, 1)))
 
@@ -320,3 +340,21 @@ if __name__ == "__main__":
     controller.step(TiltDirection.EAST)
 
     writer.print()
+
+    controller.step(TiltDirection.EAST)
+    writer.print()
+
+    controller.step(TiltDirection.EAST)
+    writer.print() 
+
+    controller.step(TiltDirection.EAST)
+    writer.print()
+
+    controller.step(TiltDirection.EAST)
+    writer.print() 
+
+    controller.step(TiltDirection.SOUTH)
+    writer.print() 
+
+    controller.step(TiltDirection.SOUTH)
+    writer.print() 
