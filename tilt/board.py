@@ -1,8 +1,7 @@
 from dataclasses import dataclass, field 
 from typing import NamedTuple, Self 
-from queue import Queue
+from queue import Queue 
 from enum import Enum 
-from abc import ABC 
 
 # TODO: Improve PEP8 compliance 
 
@@ -46,12 +45,6 @@ class GlueSides(NamedTuple):
     west: GlueType = GlueType.NONE 
 
 
-@dataclass(frozen=False, slots=True) 
-class Tile(ABC):
-    """Base class for tiles."""
-    pos: Vec2D 
-
-
 def tile_uid_generator():
     uid = 1
     while True:
@@ -65,42 +58,76 @@ def get_next_uid() -> int:
     return next(next_uid)
 
 
-@dataclass(frozen=False, slots=True) 
-class Singleton(Tile):
-    """
-    A singleton is a tile whose position changes in tilt, and may attach itself
-    to other singletons which share adjacent glues. 
-    """
-    uid: int = field(default_factory=get_next_uid)
+# @dataclass(frozen=False, slots=True) 
+# class Tile:
+#     """
+#     A tile is a tile whose position changes in tilt, and may attach itself
+#     to other tiles which share adjacent glues. 
+#     """
+#     uid: int = field(default_factory=get_next_uid)
+#     glues: GlueSides = field(default_factory=GlueSides)
+
+
+@dataclass(slots=True, frozen=False)
+class Tile:
+    position: Vec2D
     glues: GlueSides = field(default_factory=GlueSides)
+    _uid: int = field(default_factory=get_next_uid)
+
+    @property 
+    def uid(self) -> int: return self._uid 
 
 
-@dataclass(frozen=False, slots=True)
-class TileList:
-    elements: dict[Vec2D, Singleton] = field(default_factory=dict[Vec2D, Singleton])
+@dataclass(slots=True)
+class TileMap: # NOTE: How to ensure key and tile position are synchronized? 
+    """A collection of tiles indexed by position."""
+    elements: dict[Vec2D, Tile] = field(default_factory=dict[Vec2D, Tile]) 
 
-    def set_location_of(self, tile: Singleton, to: Vec2D):
-        if tile.pos not in self.elements:
-            ... # error?
+    def add(self, tile: Tile):
+        assert tile.position not in self.elements 
+        self.elements[tile.position] = tile 
+
+    def __iter__(self): # TODO: Make custom immutable iterator ? 
+        """
+        Iterate over the tile selection without mutating position. Mutation of the position
+        attribute will result in undefined behavior as index cache is not invalidated. 
+        """
+        return self.elements.values().__iter__()
+
+    def mut_iter(self):
+        """
+        Iterate over the tile selection with the expectation that tiles will permutate.
+        Behavior when this generator is terminated prematurely is undefined as it 
+        invalidates and updates the index cache. 
+        """
+        changed_tiles: Queue[tuple[Tile, Vec2D]] = Queue()
+
+        for position, tile in self.elements.items():
+            yield tile 
+            if position != tile.position: changed_tiles.put((tile, position))
+
+        while not changed_tiles.empty():
+            tile, old_position = changed_tiles.get()
+
+            self.elements.pop(old_position)
+            self.elements[tile.position] = tile  
+
+    def set_position(self, of: Tile, to: Vec2D):
+        assert self.elements[of.position] == of 
         
-        self.elements.pop(tile.pos)
-        tile.pos = to 
-        self.elements[tile.pos] = tile 
-
-    def add(self, tile: Singleton):
-        assert not tile.pos in self.elements 
-
-        self.elements[tile.pos] = tile 
+        self.elements.pop(of.position)
+        of.position = to 
+        self.elements[to] = of 
 
 
 @dataclass 
 class Board:
-    """A Board is a 2D space-bounded map which comprises of singleton tiles."""
+    """A Board is a 2D space-bounded map which comprises of tile tiles."""
     # TODO: Use sparse set if dict iteration proves to be significantly slower than list iteration 
     # Side note: Dictionary iteration is not significantly slower in perftest.py, but that may
     # change for sufficiently complex keys  
     size: Vec2D 
-    tiles: TileList = field(default_factory=TileList)
+    tiles: TileMap = field(default_factory=TileMap)
     concretes: set[Vec2D] = field(default_factory=set[Vec2D])
 
 
@@ -140,61 +167,60 @@ class TumbleController:
     """A utility driver which drives simulation of full tilt on a specified board."""
     @dataclass
     class Polyomino:
-        """A set of tiles joined by a glues."""
+        """A set of tiles joined by a glues. Local cache of managed board tiles."""
         # TODO: Store redundant references to tiles on each delta edge to 
         #       minimize iteration time of polyominoes each step 
-        singletons: dict[Vec2D, Singleton] = field(default_factory=dict[Vec2D, Singleton])
-
-        def refresh(self):
-            tiles: list[Singleton] = []
-
-            for tile in self.singletons.values(): tiles.append(tile)
-
-            self.singletons.clear()
-            for tile in tiles: self.singletons[tile.pos] = tile 
+        # tiles: dict[Vec2D, Tile] = field(default_factory=dict[Vec2D, Tile])
+        tiles: TileMap = field(default_factory=TileMap)
 
     def __init__(self, board: Board):
-        self.board = board 
+        self._board: Board = board 
 
         self.polyomino_cache: dict[Vec2D, TumbleController.Polyomino] = {} 
         self.last_direction: TiltDirection | None = None 
         self.effective_wall_cache: set[Vec2D] = set() 
 
-        # TODO: How can we perform cache invalidation faster than linear time 
-        # without clearing cache completely? 
+    # TODO: How can we perform cache invalidation faster than linear time 
+    # without clearing cache completely? 
 
-    def get_polyomino(self, tile: Singleton) -> Polyomino:
-        """Retrieve the effective polyomino generated by bonds between singleton tiles."""
-        connected_tiles: dict[Vec2D, Singleton] = {}
+    @property 
+    def board(self) -> Board: return self._board 
 
-        tiles_to_visit: Queue[Singleton] = Queue()
+    def get_polyomino(self, tile: Tile) -> Polyomino:
+        """Retrieve the effective polyomino generated by bonds between tile tiles."""
+        connected_tiles: dict[Vec2D, Tile] = {}
+
+        tiles_to_visit: Queue[Tile] = Queue()
         tiles_to_visit.put(tile)
 
         while not tiles_to_visit.empty():
             tile = tiles_to_visit.get()
-            if tile.pos in connected_tiles: continue 
+            if tile.position in connected_tiles: continue 
 
-            connected_tiles[tile.pos] = tile 
+            connected_tiles[tile.position] = tile 
 
             [tiles_to_visit.put(neighbor) for neighbor in self.glued_neighbors(tile)]
 
-        return TumbleController.Polyomino(connected_tiles)
+        return TumbleController.Polyomino(TileMap(connected_tiles))
 
     # TODO: Should I compute the entire polyomino instead? Probably yes. Or just cache the polyominoes. 
-    def glued_neighbors(self, tile: Singleton) -> list[Singleton]:
+    def glued_neighbors(self, tile: Tile) -> list[Tile]:
         """Retrieve all neighbors adjacent to tile which share glues."""
 
-        result: list[Singleton] = [] 
+        if tile.glues == GlueSides(GlueType.NONE, GlueType.NONE, GlueType.NONE, GlueType.NONE):
+            return [] 
 
-        pos_north = tile.pos.add(UNIT_VEC_NORTH)
-        pos_east = tile.pos.add(UNIT_VEC_EAST)
-        pos_south = tile.pos.add(UNIT_VEC_SOUTH)
-        pos_west = tile.pos.add(UNIT_VEC_WEST)
+        result: list[Tile] = [] 
 
-        neighbor_north = None if not pos_north in self.board.tiles.elements else self.board.tiles.elements[pos_north]
-        neighbor_east = None if not pos_east in self.board.tiles.elements else self.board.tiles.elements[pos_east]
-        neighbor_south = None if not pos_south in self.board.tiles.elements else self.board.tiles.elements[pos_south]
-        neighbor_west = None if not pos_west in self.board.tiles.elements else self.board.tiles.elements[pos_west]
+        pos_north = tile.position.add(UNIT_VEC_NORTH)
+        pos_east = tile.position.add(UNIT_VEC_EAST)
+        pos_south = tile.position.add(UNIT_VEC_SOUTH)
+        pos_west = tile.position.add(UNIT_VEC_WEST)
+
+        neighbor_north = None if not pos_north in self._board.tiles.elements else self._board.tiles.elements[pos_north]
+        neighbor_east = None if not pos_east in self._board.tiles.elements else self._board.tiles.elements[pos_east]
+        neighbor_south = None if not pos_south in self._board.tiles.elements else self._board.tiles.elements[pos_south]
+        neighbor_west = None if not pos_west in self._board.tiles.elements else self._board.tiles.elements[pos_west]
 
         if neighbor_north and neighbor_north.glues.south != GlueType.NONE and neighbor_north.glues.south == tile.glues.north:
             result.append(neighbor_north)
@@ -212,9 +238,9 @@ class TumbleController:
 
     def position_is_available(self, at: Vec2D) -> bool:
         """Returns true if `pos` is within the bounding box of `self.board` and does not contain a concrete."""
-        return (not (at in self.board.concretes or at in self.effective_wall_cache)) \
+        return (not (at in self._board.concretes or at in self.effective_wall_cache)) \
             and at.x >= 0 and at.y >= 0 \
-            and at.x < self.board.size.x and at.y < self.board.size.y 
+            and at.x < self._board.size.x and at.y < self._board.size.y 
 
     def get_delta(self, of: TiltDirection) -> Vec2D:
         match of:
@@ -227,18 +253,18 @@ class TumbleController:
             case TiltDirection.WEST:
                 return UNIT_VEC_WEST 
 
-    def get_adjacent_polyominoes(self, of: Polyomino, with_delta: Vec2D) -> list[Polyomino]:
-        """Retrieve all polyominoes that touch `of` at each `with_delta` face."""
+    def _get_adjacent_polyominoes(self, of: Polyomino, at_face: Vec2D) -> list[Polyomino]:
+        """Retrieve all polyominoes that touch `of` at each `at_face`."""
         
         result: list[TumbleController.Polyomino] = [] 
 
-        for pos in of.singletons.keys():
-            polyomino = self.polyomino_cache.get(pos.add(with_delta))
+        for pos in of.tiles.elements.keys():
+            polyomino = self.polyomino_cache.get(pos.add(at_face))
             if polyomino: result.append(polyomino)
 
         return result 
 
-    def refresh_wall_cache(self, for_direction: TiltDirection):
+    def _refresh_wall_cache(self, for_direction: TiltDirection):
         """Refreshes the cache of locations treated as walls when polyominoes cannot move."""
         self.effective_wall_cache.clear()
         
@@ -257,49 +283,90 @@ class TumbleController:
         while not queue.empty():
             polyomino = queue.get()
 
-            for pos in polyomino.singletons:
-                self.effective_wall_cache.add(pos)
+            for tile in polyomino.tiles:
+                self.effective_wall_cache.add(tile.position)
 
-            for adjacent_polyomino in self.get_adjacent_polyominoes(polyomino, polar_delta):
-                if not next(iter(adjacent_polyomino.singletons.keys())) in self.effective_wall_cache:
+            for adjacent_polyomino in self._get_adjacent_polyominoes(polyomino, polar_delta):
+                if not next(iter(adjacent_polyomino.tiles.elements.keys())) in self.effective_wall_cache:
                     queue.put(adjacent_polyomino) 
 
-    def update_wall_cache(self, for_direction: TiltDirection):
-        # TODO 
-        ...
+    def _refresh_polyomino_cache(self):
+        self.polyomino_cache.clear() 
     
-    def update_polyomino_cache(self):
-        for pos, tile in self.board.tiles.elements.items():
-            if pos in self.polyomino_cache: continue 
-
+        for tile in self._board.tiles.elements.values():
             polyomino = self.get_polyomino(tile)
 
-            for tile in polyomino.singletons.values():
-                self.polyomino_cache[tile.pos] = polyomino
+            for tile in polyomino.tiles.elements.values():
+                self.polyomino_cache[tile.position] = polyomino
 
-    def step(self, direction: TiltDirection):
-        """Perform a single step of a full tilt sequence in a given direction."""
-        self.polyomino_cache.clear() 
-        self.update_polyomino_cache()
-        self.refresh_wall_cache(direction)
-        # if direction != self.last_direction: self.refresh_wall_cache(direction)
-        # else: self.update_wall_cache(direction)
+    def _update_board(self):
+        """
+        Refresh the contents of the managed board to reflect changes made within this controller.
+        """
+        self._board.tiles.elements.clear() 
+        for polyomino in self.polyomino_cache.values():
+            self._board.tiles.elements.update(polyomino.tiles.elements)
+            polyomino.tiles.elements.clear() 
 
-        print(f"Polyominoes: {len(self.polyomino_cache)} | Wall polyominoes: {len(self.effective_wall_cache)}")
+    def _step_impl(self, direction: TiltDirection): 
+        """Internal logic."""
+        # # if direction != self.last_direction: self.refresh_wall_cache(direction)
+        # # else: self.update_wall_cache(direction)
+        # self._refresh_polyomino_cache()
+        self._refresh_wall_cache(direction)
 
         delta = self.get_delta(direction)
-        for polyomino in self.polyomino_cache.values():
-            if next(iter(polyomino.singletons.keys())) in self.effective_wall_cache: continue 
-            for pos, tile in polyomino.singletons.items():
-                self.board.tiles.set_location_of(tile, pos.add(delta))
-                polyomino.refresh()
 
-        # TODO: Polyomino cache invalidation and merge glues 
+        for pos_initial, polyomino in self.polyomino_cache.items():
+            mapped_position = next(iter(polyomino.tiles.elements.keys()))
+            
+            if mapped_position != pos_initial: continue 
+            if mapped_position in self.effective_wall_cache: continue 
+
+            for tile in polyomino.tiles.mut_iter():
+                tile.position = tile.position.add(delta) 
+
+        cache: dict[Vec2D, TumbleController.Polyomino] = {} 
+        for polyomino in self.polyomino_cache.values():
+            if next(iter(polyomino.tiles.elements.keys())) in cache: continue 
+
+            for tile in polyomino.tiles:
+                cache[tile.position] = polyomino 
+
+        self.polyomino_cache = cache 
+
+        # TODO: Polyomino cache invalidation (e.g., factory mode [?]) and merge glues 
+
+    def step(self, direction: TiltDirection):
+        """Perform a single step of a tilt in a given direction."""
+        self._refresh_polyomino_cache()
+        self._step_impl(direction)
+        self._update_board()
 
     def tumble(self, direction: TiltDirection):
         """Perform a complete full tilt in a given direction."""
+        self._refresh_polyomino_cache()
 
-        ...
+        if direction == TiltDirection.NORTH or direction == TiltDirection.SOUTH:
+            for _ in range(self._board.size.y): 
+                cache_len_old = len(self.effective_wall_cache)
+                self._step_impl(direction) 
+                if len(self.effective_wall_cache) == cache_len_old and cache_len_old != 0: break 
+        else:
+            for _ in range(self._board.size.x): 
+                cache_len_old = len(self.effective_wall_cache)
+                self._step_impl(direction) 
+                if len(self.effective_wall_cache) == cache_len_old and cache_len_old != 0: break 
+        
+        self._update_board() 
+
+    def run_sequence(self, of: list[TiltDirection]):
+        """Perform a sequence of full tilts with directiosn given by a list of movements."""
+        for direction in of: self.tumble(direction)
+
+    def cycle(self, in_directions: list[TiltDirection], n_times: int):
+        """Repeat a sequence of full tilts 0 or more times."""
+        for _ in range(n_times): self.run_sequence(in_directions)
 
 
 class BoardWriter:
@@ -326,35 +393,29 @@ class BoardWriter:
 
 
 if __name__ == "__main__":
-    board = Board(size=Vec2D(8, 3))
+    board = Board(size=Vec2D(8, 4))
     writer = BoardWriter(board)
 
-    board.tiles.add(Singleton(Vec2D(0, 0)))
-    board.tiles.add(Singleton(Vec2D(0, 1)))
-    board.tiles.add(Singleton(Vec2D(3, 1)))
+    board.tiles.add(Tile(Vec2D(0, 0)))
+    board.tiles.add(Tile(Vec2D(1, 0)))
+    board.tiles.add(Tile(Vec2D(0, 1)))
+    board.tiles.add(Tile(Vec2D(3, 1)))
 
     board.concretes.add(Vec2D(4, 0))
     board.concretes.add(Vec2D(6, 1))
 
     controller = TumbleController(board)
-    controller.step(TiltDirection.EAST)
-
+    print("Initial:")
     writer.print()
 
-    controller.step(TiltDirection.EAST)
+    controller.tumble(TiltDirection.EAST)
+    writer.print()  
+
+    controller.tumble(TiltDirection.SOUTH)
+    writer.print() 
+
+    controller.tumble(TiltDirection.WEST)
+    writer.print() 
+
+    controller.tumble(TiltDirection.NORTH)
     writer.print()
-
-    controller.step(TiltDirection.EAST)
-    writer.print() 
-
-    controller.step(TiltDirection.EAST)
-    writer.print()
-
-    controller.step(TiltDirection.EAST)
-    writer.print() 
-
-    controller.step(TiltDirection.SOUTH)
-    writer.print() 
-
-    controller.step(TiltDirection.SOUTH)
-    writer.print() 
